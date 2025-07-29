@@ -1,189 +1,263 @@
 # -----------------------------------------------------------------------------
-# AiVi - Servidor Backend v0.4 (Con Memoria Permanente)
+# AiVi DIAN - Servidor Backend v5.0 (Fase 5 - Análisis de Sentimiento)
 #
-# Se modifica el código para que el registro sea persistente. Las nuevas caras
-# se guardan y se leen desde la base de datos SQLite 'memoria_aivi.db'.
+# - Se implementa el análisis de sentimiento en la ruta /chat.
+# - El prompt de Gemini ahora se adapta al estado de ánimo del usuario.
 # -----------------------------------------------------------------------------
 
 import os
-import markdown
+import sqlite3
+import shutil
 import fitz
+from datetime import datetime
 import face_recognition
 import numpy as np
 import base64
 import io
-import sqlite3 # <--- NUEVO import para la base de datos
+import markdown
 from PIL import Image
 from flask import Flask, request, jsonify, render_template, session
-from flask_session import Session
 from flask_cors import CORS
+from flask_session import Session
 import google.generativeai as genai
+from dotenv import load_dotenv
 
 # --- 1. CONFIGURACIÓN GENERAL ---
+load_dotenv()
 app = Flask(__name__)
-CORS(app)
-app.secret_key = "una-clave-secreta-muy-segura"
+CORS(app, supports_credentials=True)
+app.config["SESSION_PERMANENT"] = False
 app.config["SESSION_TYPE"] = "filesystem"
+app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "una-clave-secreta-por-defecto")
 Session(app)
-DB_NAME = "memoria_aivi.db" # <--- NUEVO nombre de la base de datos
 
-# --- 2. CEREBRO CONVERSACIONAL (TU CÓDIGO) ---
+DB_NAME = "aivi_dian.db"
+RUT_TEMPLATE_PATH = "RUT_editable.pdf"
+USER_DOCS_PATH = "documentos_rut"
+PDF_FIELD_MAP = { "nombre": "Primer nombre", "apellido": "Primer apellido", "cedula": "Número de Identificación", "nit": "5. Número de Identificación Tributaria", "direccion": "41. Dirección principal", "email": "42. Correo electrónico", "firma": "Firma del solicitante" }
+
+# --- 2. CEREBRO CONVERSACIONAL (GEMINI) ---
 def extract_pdf_text(pdf_path):
-    # ... (tu función sin cambios) ...
-    if not os.path.exists(pdf_path): return "Error: PDF no encontrado."
+    if not os.path.exists(pdf_path): return f"Error: No se encontró el archivo PDF: {pdf_path}"
     try:
-        doc = fitz.open(pdf_path)
-        text = "".join(page.get_text() for page in doc)
-        doc.close()
-        return text
+        doc = fitz.open(pdf_path); text = "".join(page.get_text() for page in doc); doc.close(); return text
     except Exception as e: return f"Error al leer PDF: {e}"
 
-COMPANY_DATA_PDF = "empresa_data.pdf"
-COMPANY_KNOWLEDGE = extract_pdf_text(COMPANY_DATA_PDF)
+KNOWLEDGE_PDF = "preguntas_frecuentes_varias.pdf"
+KNOWLEDGE_BASE = extract_pdf_text(KNOWLEDGE_PDF)
 
 try:
-    # ... (tu código de Gemini sin cambios) ...
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key: raise ValueError("Variable GEMINI_API_KEY no encontrada.")
+    if not api_key: raise ValueError("Variable GEMINI_API_KEY no encontrada en .env")
     genai.configure(api_key=api_key)
     model_gemini = genai.GenerativeModel("gemini-1.5-flash")
 except Exception as e:
     print(f"Error configurando Gemini: {e}")
     model_gemini = None
 
-@app.route("/chat", methods=["POST"])
-def handle_chat():
-    # ... (tu función sin cambios) ...
-    return "Respuesta del chat"
-
-# --- 3. CEREBRO VISUAL (CON MEMORIA PERMANENTE) ---
-known_face_encodings = []
-known_face_names = []
-
-# --- NUEVA FUNCIÓN para crear la base de datos ---
-def setup_database():
-    """Crea la tabla en la base de datos si no existe."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    # Usamos UNIQUE en el nombre para evitar duplicados
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS personas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL UNIQUE,
-            encoding BLOB NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-# --- FUNCIÓN MODIFICADA para cargar desde archivos Y base de datos ---
-def load_known_faces():
-    """Carga rostros desde la carpeta 'known_faces' Y desde la base de datos."""
-    print("Cargando rostros conocidos para AiVi...")
-    face_folder = 'known_faces'
-    if not os.path.exists(face_folder): os.makedirs(face_folder)
-    
-    # Cargar desde la carpeta
-    for filename in os.listdir(face_folder):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            try:
-                name = os.path.splitext(filename)[0]
-                if name not in known_face_names: # Evitar duplicados si ya está en DB
-                    image_path = os.path.join(face_folder, filename)
-                    person_image = face_recognition.load_image_file(image_path)
-                    person_face_encoding = face_recognition.face_encodings(person_image)[0]
-                    known_face_encodings.append(person_face_encoding)
-                    known_face_names.append(name)
-                    print(f"- Rostro de '{name}' (archivo) cargado.")
-            except Exception as e:
-                print(f"Error al cargar {filename} de la carpeta: {e}")
-
-    # Cargar desde la base de datos
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+# --- 3. LÓGICA DE LA BASE DE DATOS Y USUARIOS ---
+# ... (Todo el código de setup_database, load_known_users, login_vision, register_user, 
+# get_user_status, logout, create_rut, y update_rut se mantiene sin cambios) ...
+known_face_encodings = []; known_face_ids = []
+def setup_database(): #...
+    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, nombre_completo TEXT, cedula TEXT UNIQUE, email TEXT UNIQUE, huella_facial BLOB, ruta_rut_pdf TEXT, fecha_modificacion TEXT)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS calificaciones (id INTEGER PRIMARY KEY, user_cedula TEXT, rating INTEGER, timestamp TEXT)")
+    conn.commit(); conn.close()
+def load_known_users(): #...
+    global known_face_encodings, known_face_ids; known_face_encodings, known_face_ids = [], []
+    print("Cargando usuarios..."); conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
     try:
-        cursor.execute("SELECT nombre, encoding FROM personas")
-        for name, encoding_blob in cursor.fetchall():
-            if name not in known_face_names:
-                encoding = np.frombuffer(encoding_blob, dtype=np.float64)
-                known_face_encodings.append(encoding)
-                known_face_names.append(name)
-                print(f"- Rostro de '{name}' (base de datos) cargado.")
-    except sqlite3.OperationalError:
-        print("Tabla 'personas' aún no creada. Se creará al iniciar.")
+        cursor.execute("SELECT cedula, huella_facial FROM usuarios")
+        for cedula, encoding_blob in cursor.fetchall():
+            encoding = np.frombuffer(encoding_blob, dtype=np.float64); known_face_encodings.append(encoding); known_face_ids.append(cedula)
+        print(f"-> {len(known_face_ids)} usuarios cargados.")
+    except sqlite3.OperationalError: print("Tabla 'usuarios' no encontrada.")
     conn.close()
-
-@app.route("/analyze_vision", methods=['POST'])
-def handle_vision():
-    # (Esta función no tiene cambios)
-    # ...
+@app.route("/login_vision", methods=['POST'])
+def handle_login_vision(): #...
     try:
         data = request.json
         if 'image' not in data: return jsonify({'error': 'No se proporcionó imagen'}), 400
-        image_data = base64.b64decode(data['image'].split(',')[1])
-        frame = np.array(Image.open(io.BytesIO(image_data)))
-        face_locations = face_recognition.face_locations(frame)
-        face_encodings = face_recognition.face_encodings(frame, face_locations)
-        recognized_people = []
-        for face_encoding in face_encodings:
-            matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.6)
-            name = "Desconocido"
-            face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-            if len(face_distances) > 0:
-                best_match_index = np.argmin(face_distances)
-                if matches[best_match_index]:
-                    name = known_face_names[best_match_index]
-            recognized_people.append(name)
-        return jsonify({'people': recognized_people})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-# --- FUNCIÓN MODIFICADA para guardar en la base de datos ---
-@app.route('/register', methods=['POST'])
-def handle_register():
+        image_data = base64.b64decode(data['image'].split(',')[1]); frame = np.array(Image.open(io.BytesIO(image_data)))
+        face_locations = face_recognition.face_locations(frame); face_encodings = face_recognition.face_encodings(frame, face_locations)
+        if not face_encodings: return jsonify({'status': 'no_face_detected'})
+        face_encoding = face_encodings[0]; matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.6)
+        user_id_cedula = "Desconocido"; user_name = "Desconocido"
+        face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+        if len(face_distances) > 0:
+            best_match_index = np.argmin(face_distances)
+            if matches[best_match_index]:
+                user_id_cedula = known_face_ids[best_match_index]
+                conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+                cursor.execute("SELECT nombre_completo FROM usuarios WHERE cedula = ?", (user_id_cedula,))
+                result = cursor.fetchone()
+                conn.close()
+                if result:
+                    user_name = result[0]; session['user_id'] = user_id_cedula; session['user_name'] = user_name; session['chat_history'] = []
+                    print(f"SESIÓN INICIADA para: {user_name} ({user_id_cedula})")
+        return jsonify({'status': 'face_analyzed', 'user_id': user_id_cedula, 'user_name': user_name})
+    except Exception as e: return jsonify({'error': str(e)}), 500
+@app.route('/register_user', methods=['POST'])
+def handle_register_user(): #...
     try:
-        data = request.json
-        name = data.get('name')
-        images_data = data.get('images')
-        if not name or not images_data: return jsonify({'error': 'Faltan datos'}), 400
+        data = request.json; name = data.get('name'); cedula = data.get('cedula'); email = data.get('email'); images_data = data.get('images')
+        if not all([name, cedula, email, images_data]): return jsonify({'error': 'Faltan datos'}), 400
+        face_encodings = []
+        for img_data in images_data:
+            img_bytes = base64.b64decode(img_data.split(',')[1]); img = np.array(Image.open(io.BytesIO(img_bytes))); current_encoding = face_recognition.face_encodings(img)
+            if current_encoding: face_encodings.append(current_encoding[0])
+        if not face_encodings: return jsonify({'error': 'No se encontró cara clara'}), 400
+        average_encoding = np.mean(face_encodings, axis=0); encoding_bytes = average_encoding.tobytes()
+        conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+        cursor.execute("INSERT INTO usuarios (nombre_completo, cedula, email, huella_facial) VALUES (?, ?, ?, ?)", (name, cedula, email, encoding_bytes))
+        conn.commit(); conn.close()
+        load_known_users(); print(f"NUEVO USUARIO REGISTRADO: {name} ({cedula})!"); return jsonify({'status': 'success', 'message': f'Usuario {name} registrado.'})
+    except sqlite3.IntegrityError: return jsonify({'error': 'La cédula o el email ya están registrados.'}), 400
+    except Exception as e: print(f"Error en registro: {e}"); return jsonify({'error': str(e)}), 500
+@app.route("/get_user_status")
+def get_user_status(): #...
+    if 'user_id' not in session: return jsonify({'error': 'No hay sesión activa'}), 401
+    user_id_cedula = session['user_id']; conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+    cursor.execute("SELECT ruta_rut_pdf FROM usuarios WHERE cedula = ?", (user_id_cedula,)); result = cursor.fetchone(); conn.close()
+    if result and result[0]: return jsonify({'has_rut': True})
+    else: return jsonify({'has_rut': False})
+@app.route("/logout")
+def logout(): #...
+    session.clear(); return jsonify({'status': 'success', 'message': 'Sesión cerrada.'})
+@app.route('/create_rut', methods=['POST'])
+def handle_create_rut(): #...
+    if 'user_id' not in session: return jsonify({'error': 'No hay sesión activa'}), 401
+    try:
+        data = request.json; user_cedula = session['user_id']; user_name = session['user_name']
+        if not os.path.exists(USER_DOCS_PATH): os.makedirs(USER_DOCS_PATH)
+        new_rut_filename = f"RUT_{user_name.replace(' ', '_')}_{user_cedula}.pdf"; new_rut_path = os.path.join(USER_DOCS_PATH, new_rut_filename)
+        shutil.copy(RUT_TEMPLATE_PATH, new_rut_path)
+        doc = fitz.open(new_rut_path)
+        for key, value in data.items():
+            pdf_field_name = PDF_FIELD_MAP.get(key)
+            if pdf_field_name:
+                for page in doc:
+                    for field in page.widgets():
+                        if field.field_name == pdf_field_name: field.field_value = str(value); field.update()
+        firma_field_name = PDF_FIELD_MAP.get("firma")
+        if firma_field_name:
+            for page in doc:
+                for field in page.widgets():
+                    if field.field_name == firma_field_name: field.field_value = f"{user_name} (Firma Electrónica)"; field.update()
+        doc.saveIncr(); doc.close()
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+        cursor.execute("UPDATE usuarios SET ruta_rut_pdf = ?, fecha_modificacion = ? WHERE cedula = ?", (new_rut_path, current_time, user_cedula))
+        conn.commit(); conn.close()
+        print(f"RUT CREADO para {user_name}"); return jsonify({'status': 'success', 'message': 'RUT creado correctamente.'})
+    except Exception as e: print(f"Error creando RUT: {e}"); return jsonify({'error': str(e)}), 500
+@app.route('/update_rut', methods=['POST'])
+def handle_update_rut(): #...
+    if 'user_id' not in session: return jsonify({'error': 'No hay sesión activa'}), 401
+    try:
+        data = request.json; field_to_update = data.get('field'); new_value = data.get('value'); user_cedula = session['user_id']; user_name = session['user_name']
+        if not field_to_update or new_value is None: return jsonify({'error': 'Faltan datos'}), 400
+        conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+        cursor.execute("SELECT ruta_rut_pdf FROM usuarios WHERE cedula = ?", (user_cedula,)); result = cursor.fetchone()
+        if not result or not result[0]: conn.close(); return jsonify({'error': 'Usuario sin RUT para actualizar'}), 404
+        rut_path = result[0]; doc = fitz.open(rut_path); pdf_field_name = PDF_FIELD_MAP.get(field_to_update)
+        if not pdf_field_name: doc.close(); conn.close(); return jsonify({'error': f'Campo "{field_to_update}" inválido'}), 400
+        field_found = False
+        for page in doc:
+            for field in page.widgets():
+                if field.field_name == pdf_field_name: field.field_value = new_value; field.update(); field_found = True; break
+            if field_found: break
+        if not field_found: doc.close(); conn.close(); return jsonify({'error': f'Campo "{pdf_field_name}" no encontrado en PDF'}), 500
+        firma_field_name = PDF_FIELD_MAP.get("firma")
+        if firma_field_name:
+            for page in doc:
+                for field in page.widgets():
+                    if field.field_name == firma_field_name: field.field_value = f"{user_name} (Firma Electrónica)"; field.update()
+        doc.saveIncr(); doc.close()
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("UPDATE usuarios SET fecha_modificacion = ? WHERE cedula = ?", (current_time, user_cedula)); conn.commit(); conn.close()
+        print(f"RUT de {user_name} actualizado. Campo: {field_to_update}"); return jsonify({'status': 'success', 'message': 'RUT actualizado.'})
+    except Exception as e: print(f"Error actualizando RUT: {e}"); return jsonify({'error': str(e)}), 500
 
-        # ... (cálculo del encoding promedio sin cambios) ...
-        new_face_encodings = []
-        for image_data in images_data:
-            img_bytes = base64.b64decode(image_data.split(',')[1])
-            img = np.array(Image.open(io.BytesIO(img_bytes)))
-            encodings = face_recognition.face_encodings(img)
-            if encodings: new_face_encodings.append(encodings[0])
-        if not new_face_encodings: return jsonify({'error': 'No se pudo encontrar una cara'}), 400
-        average_encoding = np.mean(new_face_encodings, axis=0)
+# --- 4. RUTAS DE CHAT Y CALIFICACIÓN (MODIFICADAS) ---
+@app.route('/chat', methods=['POST'])
+def handle_chat_final():
+    if 'user_id' not in session: return jsonify({'error': 'No hay sesión activa'}), 401
+    if not model_gemini: return jsonify({'error': 'Modelo IA no configurado'}), 500
+    
+    prompt = request.json.get("prompt")
+    if not prompt: return jsonify({'error': 'No se recibió pregunta'}), 400
 
-        # Añadir a la memoria de la sesión actual
-        known_face_encodings.append(average_encoding)
-        known_face_names.append(name)
-
-        # Guardado permanente en la base de datos
-        encoding_bytes = average_encoding.tobytes()
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        # Usamos INSERT OR IGNORE para evitar errores si el nombre ya existe
-        cursor.execute("INSERT OR IGNORE INTO personas (nombre, encoding) VALUES (?, ?)", (name, encoding_bytes))
-        conn.commit()
-        conn.close()
-
-        print(f"¡NUEVA PERSONA GUARDADA EN DB: {name}!")
-        return jsonify({'status': 'success', 'message': f'{name} registrado correctamente'})
+    if 'chat_history' not in session: session['chat_history'] = []
+    
+    # --- ANÁLISIS DE SENTIMIENTO ---
+    sentiment = "neutro"
+    try:
+        sentiment_prompt = f'Analiza el sentimiento del siguiente texto. Responde únicamente con una de estas tres palabras: positivo, negativo, neutro. Texto: "{prompt}"'
+        sentiment_response = model_gemini.generate_content(sentiment_prompt)
+        detected_sentiment = sentiment_response.text.strip().lower()
+        if detected_sentiment in ['positivo', 'negativo', 'neutro']:
+            sentiment = detected_sentiment
     except Exception as e:
-        print(f"Error durante el registro: {e}")
-        return jsonify({'error': str(e)}), 500
+        print(f"Error al analizar sentimiento: {e}")
 
-# --- 4. RUTA PRINCIPAL Y ARRANQUE ---
+    # --- PROMPT ENRIQUECIDO ---
+    history_context = "\n".join([f"Usuario: {h['prompt']}\nAsistente: {h['response']}" for h in session['chat_history'][-3:]])
+    
+    specialized_prompt = f"""
+    Eres AiVi, un asistente experto de la DIAN. Eres amable, cortés y muy empático.
+    
+    **Análisis de la Conversación:**
+    - Sentimiento del último mensaje del usuario: **{sentiment}**
+    - Historial de la conversación: {history_context}
+
+    **TUS INSTRUCCIONES DE COMPORTAMIENTO:**
+    1.  **ADAPTA TU TONO:** Ajusta tu estilo de respuesta al sentimiento del usuario.
+        - Si el sentimiento es **negativo**, tu tono debe ser especialmente empático y comprensivo. Ofrece ayuda de forma proactiva.
+        - Si el sentimiento es **positivo**, responde de manera amigable y entusiasta.
+        - Si el sentimiento es **neutro**, mantén un tono profesional, claro y directo.
+    2.  **USA TU BASE DE CONOCIMIENTO:** Tu única fuente de verdad es el siguiente documento. Responde basándote exclusivamente en él.
+    3.  **SÉ PROACTIVO:** Si la respuesta no está en el documento, no digas "no sé". En su lugar, responde cortésmente: "No tengo información sobre ese tema en mi base de conocimiento, pero puedo ayudarte con otros trámites del RUT."
+
+    --- DOCUMENTO DE CONOCIMIENTO ---
+    {KNOWLEDGE_BASE}
+    --- FIN DEL DOCUMENTO ---
+
+    Ahora, responde a la siguiente pregunta del usuario aplicando estrictamente tus instrucciones:
+    Usuario: {prompt}
+    """
+    try:
+        response = model_gemini.generate_content(specialized_prompt)
+        response_text = response.text
+        
+        session['chat_history'].append({"prompt": prompt, "response": response_text, "sentiment": sentiment})
+        session.modified = True
+        return jsonify({'response': markdown.markdown(response_text)})
+    except Exception as e:
+        print(f"Error en Gemini: {e}")
+        return jsonify({'error': f'Error al contactar al modelo de IA: {e}'}), 500
+
+@app.route('/rate_chat', methods=['POST'])
+def rate_chat():
+    # ... (código sin cambios) ...
+    if 'user_id' not in session: return jsonify({'error': 'No hay sesión activa'}), 401
+    rating = request.json.get('rating')
+    if not rating: return jsonify({'error': 'No se recibió calificación'}), 400
+    user_cedula = session['user_id']; timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+    cursor.execute("INSERT INTO calificaciones (user_cedula, rating, timestamp) VALUES (?, ?, ?)", (user_cedula, rating, timestamp))
+    conn.commit(); conn.close()
+    print(f"Calificación recibida: {rating} para el usuario {user_cedula}")
+    return jsonify({'status': 'success'})
+
+# --- 5. RUTA PRINCIPAL Y ARRANQUE ---
 @app.route("/")
 def home():
     return render_template("index.html")
 
 if __name__ == "__main__":
-    setup_database() # Se asegura de que la tabla exista al arrancar
-    load_known_faces()
-    print(f"Servidor AiVi (con memoria permanente) listo. {len(known_face_names)} rostros en memoria.")
+    setup_database()
+    load_known_users()
+    print(f"Servidor AiVi DIAN listo.")
     app.run(host='0.0.0.0', port=5000, debug=True)
