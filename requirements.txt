@@ -9,3 +9,4 @@ markdown
 PyMuPDF
 Pillow
 python-dotenv
+Flask-Mail
