@@ -1,1 +1,15 @@
+# Entorno Virtual
+.venv
+venv/
+venv.bak
+__pycache__/
+
+# Archivos de sesión y base de datos
+*.db
+*.sqlite3
+documentos_rut/
+.flask_session/
+
+# Archivos de entorno (¡MUY IMPORTANTE!)
 .env
+*.env
